@@ -77,21 +77,48 @@ async def download_csv() -> tuple[str, str]:
         await page.goto(report_url, wait_until="domcontentloaded")
         await page.wait_for_load_state("networkidle")
 
-        # Явно ждём пока DataTables отрендерит кнопку CSV
-        print("⏳ Ждём появления кнопки CSV...")
-        await page.wait_for_selector('a.buttons-csv', state='visible', timeout=30000)
-        await page.wait_for_timeout(1000)  # небольшая пауза после появления
+        # Ждём пока DataTables инициализируется через JS
+        print("⏳ Ждём DataTables...")
+        await page.wait_for_timeout(8000)  # даём JS время отрендерить таблицу и кнопки
         await screenshot(page, "2_report_page")
-        print(f"✅ Report loaded, кнопка CSV найдена")
 
-        # -- Скачать CSV --
-        print("⏳ Скачиваем CSV...")
-        async with page.expect_download(timeout=30000) as dl:
-            await page.click('a.buttons-csv')
-        download = await dl.value
-        await download.save_as(save_path)
+        # Дебаг — проверяем что есть на странице
+        btn_count = await page.locator('a.buttons-csv').count()
+        print(f"🔍 Найдено a.buttons-csv: {btn_count}")
+
+        dt_buttons = await page.locator('.dt-buttons a').count()
+        print(f"🔍 Найдено .dt-buttons a: {dt_buttons}")
+
+        # Если кнопка найдена — кликаем
+        if btn_count > 0:
+            print("⏳ Скачиваем CSV через a.buttons-csv...")
+            async with page.expect_download(timeout=30000) as dl:
+                await page.locator('a.buttons-csv').first.click()
+            download = await dl.value
+            await download.save_as(save_path)
+        elif dt_buttons > 0:
+            # Пробуем первую кнопку в .dt-buttons
+            print("⏳ Скачиваем CSV через .dt-buttons a:first...")
+            async with page.expect_download(timeout=30000) as dl:
+                await page.locator('.dt-buttons a').first.click()
+            download = await dl.value
+            await download.save_as(save_path)
+        else:
+            # Последний вариант — ищем через JS и кликаем напрямую
+            print("⏳ Пробуем JS click...")
+            await screenshot(page, "3_no_button_found")
+
+            # Логируем все классы ссылок для диагностики
+            all_a = await page.eval_on_selector_all(
+                'a', 'els => els.map(e => e.className + " | " + e.textContent.trim()).filter(x => x.trim())'
+            )
+            print("🔍 Все <a> на странице:")
+            for a in all_a[:40]:
+                print(f"   {a[:150]}")
+
+            raise Exception("Кнопка CSV не найдена — см. логи выше")
+
         print(f"✅ CSV saved → {save_path}")
-
         await browser.close()
         return save_path, date_str
 
@@ -121,7 +148,6 @@ def upload_to_sheets(csv_path: str, date_str: str):
 
     existing = ws.get_all_values()
 
-    # Защита от дублей
     if existing:
         existing_dates = [row[0] for row in existing[1:] if row]
         if date_str in existing_dates:
