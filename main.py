@@ -76,15 +76,18 @@ async def download_csv() -> tuple[str, str]:
         print("⏳ Переходим на отчёт...")
         await page.goto(report_url, wait_until="domcontentloaded")
         await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(5000)  # ждём пока DataTables отрендерит кнопки
+
+        # Явно ждём пока DataTables отрендерит кнопку CSV
+        print("⏳ Ждём появления кнопки CSV...")
+        await page.wait_for_selector('a.buttons-csv', state='visible', timeout=30000)
+        await page.wait_for_timeout(1000)  # небольшая пауза после появления
         await screenshot(page, "2_report_page")
-        print(f"✅ Report loaded | URL: {page.url}")
+        print(f"✅ Report loaded, кнопка CSV найдена")
 
         # -- Скачать CSV --
-        # Точный селектор из HTML: <a class="dt-button buttons-csv buttons-html5">
         print("⏳ Скачиваем CSV...")
         async with page.expect_download(timeout=30000) as dl:
-            await page.click('a.buttons-csv', timeout=10000)
+            await page.click('a.buttons-csv')
         download = await dl.value
         await download.save_as(save_path)
         print(f"✅ CSV saved → {save_path}")
