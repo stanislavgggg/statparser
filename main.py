@@ -281,12 +281,12 @@ def upload_to_sheets(header: list, all_rows: list[list], date_str: str):
 
     existing = ws.get_all_values()
 
-    # Защита от дублей
-    if existing:
-        existing_dates = [r[0] for r in existing[1:] if r]
-        if date_str in existing_dates:
-            print(f"⚠️  {date_str} уже есть — пропускаем")
-            return
+    # Защита от дублей ВРЕМЕННО ОТКЛЮЧЕНА для теста
+    # if existing:
+    #     existing_dates = [r[0] for r in existing[1:] if r]
+    #     if date_str in existing_dates:
+    #         print(f"⚠️  {date_str} уже есть — пропускаем")
+    #         return
 
     # Заголовок при первом запуске
     if not existing and header:
