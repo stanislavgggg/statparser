@@ -3,5 +3,4 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-cronSchedule = "0 1 * * *"   # каждый день в 01:00 UTC
 restartPolicyType = "NEVER"  # cron-задача — не нужен рестарт
