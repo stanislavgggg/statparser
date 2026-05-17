@@ -5,74 +5,120 @@ import json
 import gspread
 from google.oauth2.service_account import Credentials
 from playwright.async_api import async_playwright
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ---------------------------------------------------------------------------
 # Config — все значения берутся из env vars Railway
 # ---------------------------------------------------------------------------
-LOGIN_URL   = "https://gggroup.voonix.net/"
-REPORT_URL  = "https://gggroup.voonix.net/?p=siteearnings"
+LOGIN_URL = "https://gggroup.voonix.net/"
 
 USERNAME          = os.environ["VOONIX_USER"]
 PASSWORD          = os.environ["VOONIX_PASS"]
 SHEET_ID          = os.environ["GOOGLE_SHEET_ID"]
-GOOGLE_CREDS_JSON = os.environ["GOOGLE_CREDS_JSON"]   # весь JSON одной строкой
+GOOGLE_CREDS_JSON = os.environ["GOOGLE_CREDS_JSON"]
 
-DOWNLOAD_DIR = "/tmp/voonix"
+DOWNLOAD_DIR   = "/tmp/voonix"
+SCREENSHOT_DIR = "/tmp/voonix/screenshots"
+
+
+def get_report_url() -> tuple[str, str]:
+    """Возвращает URL отчёта и дату вчерашнего дня"""
+    yesterday = datetime.now() - timedelta(days=1)
+    date_str = yesterday.strftime("%Y-%m-%d")
+    url = (
+        f"https://gggroup.voonix.net/?p=siteearnings"
+        f"&start={date_str}&end={date_str}&ql=yesterday&&submit"
+    )
+    return url, date_str
+
+
+async def screenshot(page, name):
+    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+    path = os.path.join(SCREENSHOT_DIR, f"{name}.png")
+    await page.screenshot(path=path, full_page=True)
+    print(f"📸 {name}.png")
 
 
 # ---------------------------------------------------------------------------
 # 1. Скачать CSV с Voonix
 # ---------------------------------------------------------------------------
-async def download_csv() -> str:
+async def download_csv() -> tuple[str, str]:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    report_url, date_str = get_report_url()
+    save_path = os.path.join(DOWNLOAD_DIR, f"voonix_{date_str}.csv")
+
+    print(f"📅 Дата отчёта: {date_str}")
+    print(f"🔗 URL: {report_url}")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(accept_downloads=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
+        context = await browser.new_context(
+            accept_downloads=True,
+            viewport={"width": 1280, "height": 800},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        )
         page = await context.new_page()
+        page.set_default_timeout(60000)
 
         # -- Логин --
-        print("⏳ Открываем страницу логина...")
-        await page.goto(LOGIN_URL)
-        await page.wait_for_load_state("networkidle")
+        print("⏳ Логинимся...")
+        await page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        await page.wait_for_timeout(2000)
 
         await page.fill('input[name="username"]', USERNAME)
         await page.fill('input[name="password"]', PASSWORD)
-        await page.click('button[type="submit"]')
+        await page.click('input[type="submit"][value="Login"]')
         await page.wait_for_load_state("networkidle")
-        print("✅ Logged in")
+        await page.wait_for_timeout(2000)
+        await screenshot(page, "1_after_login")
+        print(f"✅ Logged in | URL: {page.url}")
 
-        # -- Переход на отчёт --
-        await page.goto(REPORT_URL)
+        # -- Переход на отчёт напрямую по URL --
+        print("⏳ Переходим на отчёт...")
+        await page.goto(report_url, wait_until="domcontentloaded")
         await page.wait_for_load_state("networkidle")
-        print("✅ Report page loaded")
-
-        # -- Клик Yesterday --
-        await page.click('a:text("Yesterday")')
-        await page.wait_for_load_state("networkidle")
-        print("✅ Yesterday selected")
+        await page.wait_for_timeout(3000)
+        await screenshot(page, "2_report_page")
+        print(f"✅ Report loaded | URL: {page.url}")
 
         # -- Скачать CSV --
-        date_str  = datetime.now().strftime("%Y-%m-%d")
-        save_path = os.path.join(DOWNLOAD_DIR, f"voonix_{date_str}.csv")
+        print("⏳ Скачиваем CSV...")
+        csv_selectors = [
+            'a:has-text("CSV")',
+            'text=CSV',
+            'a[href*="csv"]',
+            'button:has-text("CSV")',
+            'input[value="CSV"]',
+        ]
+        downloaded = False
+        for sel in csv_selectors:
+            try:
+                async with page.expect_download(timeout=30000) as dl:
+                    await page.click(sel, timeout=8000)
+                download = await dl.value
+                await download.save_as(save_path)
+                downloaded = True
+                print(f"✅ CSV downloaded via: {sel}")
+                break
+            except Exception as e:
+                print(f"   ⚠️ {sel} — {e}")
 
-        async with page.expect_download() as dl:
-            await page.click('a:text("CSV")')
+        if not downloaded:
+            await screenshot(page, "3_csv_failed")
+            raise Exception("Не удалось найти кнопку CSV")
 
-        download = await dl.value
-        await download.save_as(save_path)
         print(f"✅ CSV saved → {save_path}")
-
         await browser.close()
-        return save_path
+        return save_path, date_str
 
 
 # ---------------------------------------------------------------------------
 # 2. Загрузить CSV в Google Sheets
 # ---------------------------------------------------------------------------
-def upload_to_sheets(csv_path: str):
-    # Авторизация через service account
+def upload_to_sheets(csv_path: str, date_str: str):
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
     creds = Credentials.from_service_account_info(
         creds_dict,
@@ -83,9 +129,8 @@ def upload_to_sheets(csv_path: str):
     )
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SHEET_ID)
-    ws = sh.sheet1   # первый лист
+    ws = sh.sheet1
 
-    # Читаем CSV
     with open(csv_path, newline="", encoding="utf-8") as f:
         rows = list(csv.reader(f))
 
@@ -93,21 +138,17 @@ def upload_to_sheets(csv_path: str):
         print("⚠️  CSV пустой, пропускаем")
         return
 
-    date_str = datetime.now().strftime("%Y-%m-%d")
-
-    # Если таблица пустая — пишем заголовок
     existing = ws.get_all_values()
     if not existing:
         header = ["Date"] + rows[0]
         ws.append_row(header)
         data_rows = rows[1:]
     else:
-        data_rows = rows[1:]   # заголовок уже есть — пропускаем
+        data_rows = rows[1:]
 
-    # Записываем строки данных
     uploaded = 0
     for row in data_rows:
-        if any(cell.strip() for cell in row):   # пропускаем пустые строки
+        if any(cell.strip() for cell in row):
             ws.append_row([date_str] + row)
             uploaded += 1
 
@@ -118,8 +159,8 @@ def upload_to_sheets(csv_path: str):
 # Entry point
 # ---------------------------------------------------------------------------
 async def main():
-    csv_path = await download_csv()
-    upload_to_sheets(csv_path)
+    csv_path, date_str = await download_csv()
+    upload_to_sheets(csv_path, date_str)
     print("🎉 All done!")
 
 
