@@ -22,7 +22,6 @@ SCREENSHOT_DIR = "/tmp/voonix/screenshots"
 
 
 def get_report_url() -> tuple[str, str]:
-    """Возвращает URL отчёта и дату вчерашнего дня"""
     yesterday = datetime.now() - timedelta(days=1)
     date_str = yesterday.strftime("%Y-%m-%d")
     url = (
@@ -34,8 +33,7 @@ def get_report_url() -> tuple[str, str]:
 
 async def screenshot(page, name):
     os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-    path = os.path.join(SCREENSHOT_DIR, f"{name}.png")
-    await page.screenshot(path=path, full_page=True)
+    await page.screenshot(path=f"{SCREENSHOT_DIR}/{name}.png", full_page=True)
     print(f"📸 {name}.png")
 
 
@@ -67,7 +65,6 @@ async def download_csv() -> tuple[str, str]:
         print("⏳ Логинимся...")
         await page.goto(LOGIN_URL, wait_until="domcontentloaded")
         await page.wait_for_timeout(2000)
-
         await page.fill('input[name="username"]', USERNAME)
         await page.fill('input[name="password"]', PASSWORD)
         await page.click('input[type="submit"][value="Login"]')
@@ -76,7 +73,7 @@ async def download_csv() -> tuple[str, str]:
         await screenshot(page, "1_after_login")
         print(f"✅ Logged in | URL: {page.url}")
 
-        # -- Переход на отчёт напрямую по URL --
+        # -- Переход на отчёт напрямую --
         print("⏳ Переходим на отчёт...")
         await page.goto(report_url, wait_until="domcontentloaded")
         await page.wait_for_load_state("networkidle")
@@ -86,15 +83,8 @@ async def download_csv() -> tuple[str, str]:
 
         # -- Скачать CSV --
         print("⏳ Скачиваем CSV...")
-        csv_selectors = [
-            'a:has-text("CSV")',
-            'text=CSV',
-            'a[href*="csv"]',
-            'button:has-text("CSV")',
-            'input[value="CSV"]',
-        ]
         downloaded = False
-        for sel in csv_selectors:
+        for sel in ['a:has-text("CSV")', 'text=CSV', 'a[href*="csv"]']:
             try:
                 async with page.expect_download(timeout=30000) as dl:
                     await page.click(sel, timeout=8000)
@@ -116,7 +106,7 @@ async def download_csv() -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# 2. Загрузить CSV в Google Sheets
+# 2. Загрузить CSV в Google Sheets (с защитой от дублей)
 # ---------------------------------------------------------------------------
 def upload_to_sheets(csv_path: str, date_str: str):
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
@@ -139,20 +129,31 @@ def upload_to_sheets(csv_path: str, date_str: str):
         return
 
     existing = ws.get_all_values()
+
+    # -- Защита от дублей --
+    # Если в таблице уже есть строки с этой датой — пропускаем
+    if existing:
+        existing_dates = [row[0] for row in existing[1:] if row]  # первая колонка = Date
+        if date_str in existing_dates:
+            print(f"⚠️  Данные за {date_str} уже есть в таблице — пропускаем")
+            return
+
+    # Если таблица пустая — пишем заголовок
     if not existing:
         header = ["Date"] + rows[0]
         ws.append_row(header)
         data_rows = rows[1:]
     else:
-        data_rows = rows[1:]
+        data_rows = rows[1:]  # заголовок уже есть
 
+    # Записываем строки данных
     uploaded = 0
     for row in data_rows:
         if any(cell.strip() for cell in row):
             ws.append_row([date_str] + row)
             uploaded += 1
 
-    print(f"✅ {uploaded} rows → Google Sheets")
+    print(f"✅ {uploaded} rows за {date_str} → Google Sheets")
 
 
 # ---------------------------------------------------------------------------
