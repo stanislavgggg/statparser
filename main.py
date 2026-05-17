@@ -7,9 +7,6 @@ from google.oauth2.service_account import Credentials
 from playwright.async_api import async_playwright
 from datetime import datetime, timedelta
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 BASE_URL  = "https://gggroup.voonix.net"
 LOGIN_URL = f"{BASE_URL}/"
 
@@ -62,46 +59,73 @@ async def download_csv() -> tuple[str, str]:
         await page.fill('input[name="username"]', USERNAME)
         await page.fill('input[name="password"]', PASSWORD)
         await page.click('input[type="submit"][value="Login"]')
-
-        # Ждём появления элемента главной страницы после логина
-        # Из HTML видно: после логина есть div id="menu"
         await page.wait_for_selector('#menu', timeout=30000)
         await page.wait_for_timeout(1000)
         print(f"✅ Logged in | URL: {page.url}")
-        await screenshot(page, "1_logged_in")
 
-        # -- Переходим на отчёт в том же окне --
+        # -- Переходим на отчёт --
         print("⏳ Переходим на отчёт...")
         await page.goto(report_url, wait_until="domcontentloaded")
-
-        # Ждём появления div#sitestats — это контейнер с таблицей
-        print("⏳ Ждём таблицу (#sitestats)...")
         await page.wait_for_selector('#sitestats', timeout=30000)
+        await page.wait_for_timeout(2000)
+        await screenshot(page, "1_report")
+        print(f"✅ Report loaded")
 
-        # Ждём появления кнопки CSV которую рендерит DataTables
-        print("⏳ Ждём кнопку CSV (.buttons-csv)...")
-        await page.wait_for_selector('a.buttons-csv', timeout=30000)
-        await page.wait_for_timeout(500)
+        # -- Дебаг: логируем всё что есть в зоне Download --
+        download_area = await page.evaluate("""
+            () => {
+                // Ищем всё вокруг слова Download
+                const all = document.querySelectorAll('a, input[type=button], input[type=submit], button');
+                return Array.from(all).map(el => ({
+                    tag: el.tagName,
+                    type: el.type || '',
+                    value: el.value || '',
+                    text: el.textContent.trim(),
+                    href: el.href || '',
+                    class: el.className,
+                    name: el.name || ''
+                })).filter(el => 
+                    el.text.includes('CSV') || el.text.includes('Excel') || 
+                    el.value.includes('CSV') || el.href.includes('csv') ||
+                    el.class.includes('csv') || el.name.includes('csv')
+                );
+            }
+        """)
+        print(f"🔍 CSV-related элементы: {download_area}")
 
-        rows_count = await page.locator('table tr').count()
-        print(f"✅ Таблица загружена | tr: {rows_count}")
-        await screenshot(page, "2_report")
+        # Пробуем все варианты Download CSV
+        selectors = [
+            'input[value="CSV"]',
+            'a:has-text("CSV")',
+            'button:has-text("CSV")',
+            'input[name*="csv"]',
+            'a[href*="csv"]',
+        ]
+        downloaded = False
+        for sel in selectors:
+            try:
+                count = await page.locator(sel).count()
+                print(f"   {sel} → count: {count}")
+                if count > 0:
+                    async with page.expect_download(timeout=15000) as dl:
+                        await page.locator(sel).first.click()
+                    download = await dl.value
+                    await download.save_as(save_path)
+                    downloaded = True
+                    print(f"✅ Downloaded via: {sel}")
+                    break
+            except Exception as e:
+                print(f"   ⚠️ {sel}: {e}")
 
-        # -- Скачиваем CSV --
-        print("⏳ Скачиваем CSV...")
-        async with page.expect_download(timeout=30000) as dl:
-            await page.locator('a.buttons-csv').first.click()
-        download = await dl.value
-        await download.save_as(save_path)
+        if not downloaded:
+            await screenshot(page, "2_failed")
+            raise Exception("Не удалось скачать CSV")
+
         print(f"✅ CSV saved → {save_path}")
-
         await browser.close()
         return save_path, date_str
 
 
-# ---------------------------------------------------------------------------
-# 2. Загрузить в Google Sheets
-# ---------------------------------------------------------------------------
 def upload_to_sheets(csv_path: str, date_str: str):
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
     creds = Credentials.from_service_account_info(
