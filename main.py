@@ -16,8 +16,8 @@ LOGIN_URL = f"{BASE_URL}/"
 
 USERNAME          = os.environ["VOONIX_USER"]
 PASSWORD          = os.environ["VOONIX_PASS"]
-GMAIL_USER        = os.environ["GMAIL_USER"]       # stanislav@gggroup.media
-GMAIL_APP_PASS    = os.environ["GMAIL_APP_PASS"]   # mhvjjfwsoqqgjnzc
+GMAIL_USER        = os.environ["GMAIL_USER"]
+GMAIL_APP_PASS    = os.environ["GMAIL_APP_PASS"]
 SHEET_ID          = os.environ["GOOGLE_SHEET_ID"]
 GOOGLE_CREDS_JSON = os.environ["GOOGLE_CREDS_JSON"]
 
@@ -35,50 +35,41 @@ async def screenshot(page, name):
     print(f"📸 {name}.png")
 
 
-def get_voonix_code_from_gmail(timeout=60) -> str:
-    """Читает последний код верификации от Voonix из Gmail через IMAP"""
-    print("📧 Подключаемся к Gmail IMAP...")
+def get_voonix_code_from_gmail(timeout=90) -> str:
+    print("📧 Читаем код из Gmail...")
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(GMAIL_USER, GMAIL_APP_PASS)
     mail.select("inbox")
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        # Ищем письма от Voonix за последние 5 минут
         _, data = mail.search(None, 'FROM', '"no-reply@voonix.net"', 'UNSEEN')
         ids = data[0].split()
-
         if ids:
-            # Берём последнее письмо
             _, msg_data = mail.fetch(ids[-1], "(RFC822)")
             msg = email.message_from_bytes(msg_data[0][1])
-
-            # Извлекаем текст
             body = ""
             if msg.is_multipart():
                 for part in msg.walk():
-                    if part.get_content_type() == "text/plain":
-                        body = part.get_payload(decode=True).decode()
+                    ct = part.get_content_type()
+                    if ct in ("text/plain", "text/html"):
+                        body = part.get_payload(decode=True).decode(errors="ignore")
                         break
-                    elif part.get_content_type() == "text/html":
-                        body = part.get_payload(decode=True).decode()
             else:
-                body = msg.get_payload(decode=True).decode()
+                body = msg.get_payload(decode=True).decode(errors="ignore")
 
-            # Ищем 6-значный код
             codes = re.findall(r'\b(\d{6})\b', body)
             if codes:
-                code = codes[0]
-                print(f"✅ Код найден: {code}")
+                print(f"✅ Код: {codes[0]}")
                 mail.store(ids[-1], '+FLAGS', '\\Seen')
                 mail.logout()
-                return code
+                return codes[0]
 
-        print("⏳ Код ещё не пришёл, ждём 5 сек...")
+        print("⏳ Ждём письмо...")
         time.sleep(5)
 
     mail.logout()
-    raise Exception("Код верификации не получен за 60 секунд")
+    raise Exception("Код не получен за 90 секунд")
 
 
 async def download_csv() -> tuple[str, str]:
@@ -86,7 +77,6 @@ async def download_csv() -> tuple[str, str]:
     date_str = get_yesterday()
     save_path = os.path.join(DOWNLOAD_DIR, f"voonix_{date_str}.csv")
     report_params = f"?p=siteearnings&start={date_str}&end={date_str}&ql=yesterday&&submit"
-
     print(f"📅 Дата: {date_str}")
 
     async with async_playwright() as p:
@@ -110,37 +100,26 @@ async def download_csv() -> tuple[str, str]:
         await page.fill('input[name="password"]', PASSWORD)
         await page.click('input[type="submit"][value="Login"]')
         await page.wait_for_timeout(5000)
-        await screenshot(page, "1_after_login")
-        print(f"   URL: {page.url} | Title: {await page.title()}")
 
-        # -- Проверяем нужен ли код верификации --
+        # -- 2FA если нужен --
         body_text = await page.inner_text('body')
-        if 'Verification' in body_text or 'verification' in body_text or 'code' in body_text.lower():
-            print("🔐 Нужен код верификации — читаем из Gmail...")
-            code = get_voonix_code_from_gmail(timeout=90)
-
-            # Вводим код
-            await page.fill('input[type="text"], input[name="code"], input[placeholder*="code"], input[placeholder*="Code"]', code)
-            await screenshot(page, "2_code_entered")
+        if 'erification' in body_text:
+            print("🔐 Нужен код верификации...")
+            code = get_voonix_code_from_gmail()
+            code_input = page.locator('input[type="text"]').first
+            await code_input.fill(code)
             await page.click('input[type="submit"], button[type="submit"]')
             await page.wait_for_timeout(5000)
-            await screenshot(page, "3_after_code")
             print(f"✅ Код введён | URL: {page.url}")
 
         # -- Переходим на отчёт --
         print("⏳ Переходим на отчёт...")
         await page.evaluate(f"window.location.href = '/{report_params}'")
         await page.wait_for_timeout(10000)
-        await screenshot(page, "4_report")
-        print(f"✅ Report | URL: {page.url} | Title: {await page.title()}")
+        print(f"✅ Report | URL: {page.url}")
 
         btn_count = await page.locator('a.buttons-csv').count()
-        rows_count = await page.locator('table tr').count()
-        print(f"🔍 a.buttons-csv: {btn_count} | rows: {rows_count}")
-
         if btn_count == 0:
-            body = await page.inner_text('body')
-            print(f"Body: {body[:300]}")
             raise Exception("Кнопка CSV не найдена")
 
         # -- Скачиваем CSV --
@@ -173,6 +152,7 @@ def upload_to_sheets(csv_path: str, date_str: str):
     sh = gc.open_by_key(SHEET_ID)
     ws = sh.sheet1
 
+    # Читаем CSV
     with open(csv_path, newline="", encoding="utf-8") as f:
         rows = list(csv.reader(f))
 
@@ -180,26 +160,34 @@ def upload_to_sheets(csv_path: str, date_str: str):
         print("⚠️  CSV пустой")
         return
 
+    # Отделяем заголовок и строки данных (без итоговой строки "Site")
+    header = rows[0]
+    data_rows = [
+        row for row in rows[1:]
+        if any(cell.strip() for cell in row)      # не пустые
+        and row[0].strip().lower() != "site"       # не итоговая строка
+    ]
+
     existing = ws.get_all_values()
+
+    # -- Защита от дублей --
     if existing:
-        existing_dates = [row[0] for row in existing[1:] if row]
+        existing_dates = [r[0] for r in existing[1:] if r]
         if date_str in existing_dates:
             print(f"⚠️  {date_str} уже есть — пропускаем")
             return
 
+    # -- Если таблица пустая — пишем заголовок --
     if not existing:
-        ws.append_row(["Date"] + rows[0])
-        data_rows = rows[1:]
-    else:
-        data_rows = rows[1:]
+        ws.append_row(["Date"] + header)
 
+    # -- Пишем строки данных --
     uploaded = 0
     for row in data_rows:
-        if any(cell.strip() for cell in row):
-            ws.append_row([date_str] + row)
-            uploaded += 1
+        ws.append_row([date_str] + row)
+        uploaded += 1
 
-    print(f"✅ {uploaded} rows → Google Sheets")
+    print(f"✅ {uploaded} строк за {date_str} → Google Sheets")
 
 
 async def main():
