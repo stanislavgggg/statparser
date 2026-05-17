@@ -21,14 +21,8 @@ DOWNLOAD_DIR   = "/tmp/voonix"
 SCREENSHOT_DIR = "/tmp/voonix/screenshots"
 
 
-def get_report_url() -> tuple[str, str]:
-    yesterday = datetime.now() - timedelta(days=1)
-    date_str = yesterday.strftime("%Y-%m-%d")
-    url = (
-        f"https://gggroup.voonix.net/?p=siteearnings"
-        f"&start={date_str}&end={date_str}&ql=yesterday&&submit"
-    )
-    return url, date_str
+def get_yesterday() -> str:
+    return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 async def screenshot(page, name):
@@ -42,11 +36,14 @@ async def screenshot(page, name):
 # ---------------------------------------------------------------------------
 async def download_csv() -> tuple[str, str]:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    report_url, date_str = get_report_url()
+    date_str = get_yesterday()
     save_path = os.path.join(DOWNLOAD_DIR, f"voonix_{date_str}.csv")
+    report_url = (
+        f"https://gggroup.voonix.net/?p=siteearnings"
+        f"&start={date_str}&end={date_str}&ql=yesterday&&submit"
+    )
 
     print(f"📅 Дата отчёта: {date_str}")
-    print(f"🔗 URL: {report_url}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -76,47 +73,87 @@ async def download_csv() -> tuple[str, str]:
         print("⏳ Переходим на отчёт...")
         await page.goto(report_url, wait_until="domcontentloaded")
         await page.wait_for_load_state("networkidle")
-
-        # Ждём пока DataTables инициализируется через JS
-        print("⏳ Ждём DataTables...")
-        await page.wait_for_timeout(8000)  # даём JS время отрендерить таблицу и кнопки
+        await page.wait_for_timeout(8000)
         await screenshot(page, "2_report_page")
 
-        # Дебаг — проверяем что есть на странице
-        btn_count = await page.locator('a.buttons-csv').count()
-        print(f"🔍 Найдено a.buttons-csv: {btn_count}")
+        # Дебаг: смотрим что вообще есть на странице
+        title = await page.title()
+        url_now = page.url
+        print(f"📄 Title: {title} | URL: {url_now}")
 
-        dt_buttons = await page.locator('.dt-buttons a').count()
-        print(f"🔍 Найдено .dt-buttons a: {dt_buttons}")
+        # Считаем строки таблицы — если 0, значит не залогинились
+        rows_count = await page.locator('table tr').count()
+        print(f"🔍 Строк в таблице: {rows_count}")
 
-        # Если кнопка найдена — кликаем
-        if btn_count > 0:
-            print("⏳ Скачиваем CSV через a.buttons-csv...")
-            async with page.expect_download(timeout=30000) as dl:
-                await page.locator('a.buttons-csv').first.click()
-            download = await dl.value
-            await download.save_as(save_path)
-        elif dt_buttons > 0:
-            # Пробуем первую кнопку в .dt-buttons
-            print("⏳ Скачиваем CSV через .dt-buttons a:first...")
-            async with page.expect_download(timeout=30000) as dl:
-                await page.locator('.dt-buttons a').first.click()
-            download = await dl.value
-            await download.save_as(save_path)
-        else:
-            # Последний вариант — ищем через JS и кликаем напрямую
-            print("⏳ Пробуем JS click...")
-            await screenshot(page, "3_no_button_found")
+        all_a_texts = await page.eval_on_selector_all(
+            'a', 'els => els.map(e => (e.className + " :: " + e.textContent.trim()).substring(0, 100))'
+        )
+        print(f"🔍 Всего <a> на странице: {len(all_a_texts)}")
+        for a in all_a_texts[:50]:
+            if a.strip():
+                print(f"   {a}")
 
-            # Логируем все классы ссылок для диагностики
-            all_a = await page.eval_on_selector_all(
-                'a', 'els => els.map(e => e.className + " | " + e.textContent.trim()).filter(x => x.trim())'
-            )
-            print("🔍 Все <a> на странице:")
-            for a in all_a[:40]:
-                print(f"   {a[:150]}")
+        # -- Получаем куки сессии и делаем прямой HTTP запрос на экспорт --
+        # DataTables CSV кнопка генерирует CSV из данных таблицы на клиенте (JS)
+        # Попробуем найти данные через прямой запрос с куками сессии
+        cookies = await context.cookies()
+        cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+        print(f"🍪 Cookies: {cookie_str[:200]}")
 
-            raise Exception("Кнопка CSV не найдена — см. логи выше")
+        # Пробуем получить страницу через fetch с куками и извлечь данные
+        # Строим CSV URL — voonix может поддерживать прямой экспорт
+        export_urls = [
+            f"https://gggroup.voonix.net/?p=siteearnings&start={date_str}&end={date_str}&ql=yesterday&&submit&export=csv",
+            f"https://gggroup.voonix.net/?p=siteearnings&start={date_str}&end={date_str}&export=csv",
+            f"https://gggroup.voonix.net/export.php?p=siteearnings&start={date_str}&end={date_str}&format=csv",
+        ]
+
+        downloaded = False
+        for export_url in export_urls:
+            print(f"⏳ Пробуем прямой экспорт: {export_url}")
+            try:
+                async with page.expect_download(timeout=10000) as dl:
+                    await page.goto(export_url)
+                download = await dl.value
+                await download.save_as(save_path)
+                downloaded = True
+                print(f"✅ Downloaded via direct URL!")
+                break
+            except Exception as e:
+                print(f"   ⚠️ {e}")
+
+        if not downloaded:
+            # Последняя попытка — извлечь данные таблицы через JS и сохранить как CSV
+            print("⏳ Извлекаем данные таблицы через JS...")
+            await page.goto(report_url, wait_until="domcontentloaded")
+            await page.wait_for_load_state("networkidle")
+            await page.wait_for_timeout(8000)
+
+            table_data = await page.evaluate("""
+                () => {
+                    const rows = document.querySelectorAll('table tr');
+                    const data = [];
+                    rows.forEach(row => {
+                        const cells = row.querySelectorAll('th, td');
+                        const rowData = Array.from(cells).map(c => c.textContent.trim());
+                        if (rowData.length > 0) data.push(rowData);
+                    });
+                    return data;
+                }
+            """)
+
+            if table_data and len(table_data) > 1:
+                with open(save_path, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerows(table_data)
+                downloaded = True
+                print(f"✅ CSV извлечён из таблицы через JS: {len(table_data)} строк")
+            else:
+                print(f"⚠️ Таблица пустая: {table_data}")
+
+        if not downloaded:
+            await screenshot(page, "4_failed")
+            raise Exception("Не удалось получить данные")
 
         print(f"✅ CSV saved → {save_path}")
         await browser.close()
