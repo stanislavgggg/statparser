@@ -21,6 +21,7 @@ GMAIL_APP_PASS    = os.environ["GMAIL_APP_PASS"]
 SHEET_ID          = os.environ["GOOGLE_SHEET_ID"]
 GOOGLE_CREDS_JSON = os.environ["GOOGLE_CREDS_JSON"]
 
+SITE_ID        = "82"   # MAIL
 DOWNLOAD_DIR   = "/tmp/voonix"
 SCREENSHOT_DIR = "/tmp/voonix/screenshots"
 
@@ -40,7 +41,6 @@ def get_voonix_code_from_gmail(timeout=90) -> str:
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(GMAIL_USER, GMAIL_APP_PASS)
     mail.select("inbox")
-
     deadline = time.time() + timeout
     while time.time() < deadline:
         _, data = mail.search(None, 'FROM', '"no-reply@voonix.net"', 'UNSEEN')
@@ -51,32 +51,181 @@ def get_voonix_code_from_gmail(timeout=90) -> str:
             body = ""
             if msg.is_multipart():
                 for part in msg.walk():
-                    ct = part.get_content_type()
-                    if ct in ("text/plain", "text/html"):
+                    if part.get_content_type() in ("text/plain", "text/html"):
                         body = part.get_payload(decode=True).decode(errors="ignore")
                         break
             else:
                 body = msg.get_payload(decode=True).decode(errors="ignore")
-
             codes = re.findall(r'\b(\d{6})\b', body)
             if codes:
                 print(f"✅ Код: {codes[0]}")
                 mail.store(ids[-1], '+FLAGS', '\\Seen')
                 mail.logout()
                 return codes[0]
-
         print("⏳ Ждём письмо...")
         time.sleep(5)
-
     mail.logout()
     raise Exception("Код не получен за 90 секунд")
 
 
-async def download_csv() -> tuple[str, str]:
+def parse_table(rows: list[list[str]]) -> list[list[str]]:
+    """Убирает пустые строки и итоговые строки из CSV"""
+    result = []
+    for row in rows:
+        if not any(cell.strip() for cell in row):
+            continue
+        first = row[0].strip().lower() if row else ""
+        # Пропускаем итоговые строки (повтор заголовка)
+        if first in ("site", "advertiser", "account", "username", "campaign", "login"):
+            continue
+        result.append(row)
+    return result
+
+
+async def navigate(page, params: str):
+    """Навигация внутри браузера без потери сессии"""
+    await page.evaluate(f"window.location.href = '/{params}'")
+    await page.wait_for_timeout(6000)
+
+
+async def download_level_csv(page, params: str, save_path: str) -> list[list[str]]:
+    """Переходит на страницу и скачивает CSV, возвращает строки данных"""
+    await navigate(page, params)
+
+    btn = page.locator('a.buttons-csv')
+    count = await btn.count()
+    if count == 0:
+        print(f"   ⚠️ Кнопка CSV не найдена для {params}")
+        return []
+
+    async with page.expect_download(timeout=30000) as dl:
+        await page.evaluate("""
+            () => {
+                const btn = document.querySelector('a.buttons-csv');
+                btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+            }
+        """)
+    download = await dl.value
+    await download.save_as(save_path)
+
+    with open(save_path, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+
+    if not rows:
+        return []
+
+    header = rows[0]
+    data = parse_table(rows[1:])
+    return header, data
+
+
+async def get_advertiser_ids(page, date_str: str) -> list[tuple[str, str]]:
+    """Возвращает список (adve_id, advertiser_name) со страницы уровня 1"""
+    params = f"?p=siteearnings&start={date_str}&end={date_str}&site={SITE_ID}&ql=yesterday&&submit"
+    await navigate(page, params)
+
+    # Извлекаем ссылки на advertisers из таблицы
+    links = await page.evaluate("""
+        () => {
+            const rows = document.querySelectorAll('table tbody tr');
+            const result = [];
+            rows.forEach(row => {
+                const link = row.querySelector('a[href*="adve="]');
+                if (link) {
+                    const href = link.href;
+                    const match = href.match(/adve=(\d+)/);
+                    if (match) {
+                        result.push({
+                            id: match[1],
+                            name: link.textContent.trim()
+                        });
+                    }
+                }
+            });
+            return result;
+        }
+    """)
+    print(f"🔍 Найдено advertisers: {len(links)}")
+    return [(l['id'], l['name']) for l in links]
+
+
+async def get_account_ids(page, date_str: str, adve_id: str) -> list[tuple[str, str]]:
+    """Возвращает список (login_id, account_name) со страницы уровня 2"""
+    params = f"?p=siteearnings&start={date_str}&end={date_str}&site={SITE_ID}&adve={adve_id}&ql=yesterday&&submit"
+    await navigate(page, params)
+
+    links = await page.evaluate("""
+        () => {
+            const rows = document.querySelectorAll('table tbody tr');
+            const result = [];
+            rows.forEach(row => {
+                const link = row.querySelector('a[href*="login="]');
+                if (link) {
+                    const href = link.href;
+                    const match = href.match(/login=(\d+)/);
+                    if (match) {
+                        result.push({
+                            id: match[1],
+                            name: link.textContent.trim()
+                        });
+                    }
+                }
+            });
+            return result;
+        }
+    """)
+    return [(l['id'], l['name']) for l in links]
+
+
+async def scrape_all(page, date_str: str) -> tuple[list, list[list]]:
+    """Скачивает все 3 уровня и возвращает (header, все строки данных)"""
+    all_rows = []
+    header = None
+
+    # -- Уровень 1: Advertisers --
+    print("📊 Уровень 1: Advertisers...")
+    params_l1 = f"?p=siteearnings&start={date_str}&end={date_str}&site={SITE_ID}&ql=yesterday&&submit"
+    path_l1 = f"{DOWNLOAD_DIR}/l1_{date_str}.csv"
+    result = await download_level_csv(page, params_l1, path_l1)
+    if result:
+        h, data = result
+        if header is None:
+            header = ["Date", "Advertiser", "Account", "Campaign"] + h
+        for row in data:
+            all_rows.append([date_str, row[0] if row else "", "", ""] + row)
+        print(f"   ✅ {len(data)} advertisers")
+
+    # -- Уровень 2 & 3: для каждого advertiser --
+    adve_list = await get_advertiser_ids(page, date_str)
+
+    for adve_id, adve_name in adve_list:
+        print(f"📊 Уровень 2: {adve_name} (adve={adve_id})...")
+        params_l2 = f"?p=siteearnings&start={date_str}&end={date_str}&site={SITE_ID}&adve={adve_id}&ql=yesterday&&submit"
+        path_l2 = f"{DOWNLOAD_DIR}/l2_{adve_id}_{date_str}.csv"
+        result2 = await download_level_csv(page, params_l2, path_l2)
+        if result2:
+            h2, data2 = result2
+            for row in data2:
+                all_rows.append([date_str, adve_name, row[0] if row else "", ""] + row[1:])
+
+        # Уровень 3
+        account_list = await get_account_ids(page, date_str, adve_id)
+        for login_id, account_name in account_list:
+            print(f"   📊 Уровень 3: {account_name} (login={login_id})...")
+            params_l3 = f"?p=siteearnings&start={date_str}&end={date_str}&site={SITE_ID}&adve={adve_id}&login={login_id}&ql=yesterday&&submit"
+            path_l3 = f"{DOWNLOAD_DIR}/l3_{adve_id}_{login_id}_{date_str}.csv"
+            result3 = await download_level_csv(page, params_l3, path_l3)
+            if result3:
+                h3, data3 = result3
+                for row in data3:
+                    all_rows.append([date_str, adve_name, account_name, row[0] if row else ""] + row[1:])
+
+    return header, all_rows
+
+
+async def main_scrape() -> tuple[list, list[list], str]:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     date_str = get_yesterday()
-    save_path = os.path.join(DOWNLOAD_DIR, f"voonix_{date_str}.csv")
-    report_params = f"?p=siteearnings&start={date_str}&end={date_str}&ql=yesterday&&submit"
     print(f"📅 Дата: {date_str}")
 
     async with async_playwright() as p:
@@ -101,45 +250,23 @@ async def download_csv() -> tuple[str, str]:
         await page.click('input[type="submit"][value="Login"]')
         await page.wait_for_timeout(5000)
 
-        # -- 2FA если нужен --
         body_text = await page.inner_text('body')
         if 'erification' in body_text:
             print("🔐 Нужен код верификации...")
             code = get_voonix_code_from_gmail()
-            code_input = page.locator('input[type="text"]').first
-            await code_input.fill(code)
+            await page.locator('input[type="text"]').first.fill(code)
             await page.click('input[type="submit"], button[type="submit"]')
             await page.wait_for_timeout(5000)
-            print(f"✅ Код введён | URL: {page.url}")
+            print(f"✅ Код введён")
 
-        # -- Переходим на отчёт --
-        print("⏳ Переходим на отчёт...")
-        await page.evaluate(f"window.location.href = '/{report_params}'")
-        await page.wait_for_timeout(10000)
-        print(f"✅ Report | URL: {page.url}")
+        print(f"✅ Logged in | URL: {page.url}")
 
-        btn_count = await page.locator('a.buttons-csv').count()
-        if btn_count == 0:
-            raise Exception("Кнопка CSV не найдена")
-
-        # -- Скачиваем CSV --
-        print("⏳ Скачиваем CSV...")
-        async with page.expect_download(timeout=30000) as dl:
-            await page.evaluate("""
-                () => {
-                    const btn = document.querySelector('a.buttons-csv');
-                    btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-                }
-            """)
-        download = await dl.value
-        await download.save_as(save_path)
-        print(f"✅ CSV saved → {save_path}")
-
+        header, all_rows = await scrape_all(page, date_str)
         await browser.close()
-        return save_path, date_str
+        return header, all_rows, date_str
 
 
-def upload_to_sheets(csv_path: str, date_str: str):
+def upload_to_sheets(header: list, all_rows: list[list], date_str: str):
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
     creds = Credentials.from_service_account_info(
         creds_dict,
@@ -152,47 +279,29 @@ def upload_to_sheets(csv_path: str, date_str: str):
     sh = gc.open_by_key(SHEET_ID)
     ws = sh.sheet1
 
-    # Читаем CSV
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        rows = list(csv.reader(f))
-
-    if not rows:
-        print("⚠️  CSV пустой")
-        return
-
-    # Отделяем заголовок и строки данных (без итоговой строки "Site")
-    header = rows[0]
-    data_rows = [
-        row for row in rows[1:]
-        if any(cell.strip() for cell in row)      # не пустые
-        and row[0].strip().lower() != "site"       # не итоговая строка
-    ]
-
     existing = ws.get_all_values()
 
-    # -- Защита от дублей --
+    # Защита от дублей
     if existing:
         existing_dates = [r[0] for r in existing[1:] if r]
         if date_str in existing_dates:
             print(f"⚠️  {date_str} уже есть — пропускаем")
             return
 
-    # -- Если таблица пустая — пишем заголовок --
-    if not existing:
-        ws.append_row(["Date"] + header)
+    # Заголовок при первом запуске
+    if not existing and header:
+        ws.append_row(header)
 
-    # -- Пишем строки данных --
-    uploaded = 0
-    for row in data_rows:
-        ws.append_row([date_str] + row)
-        uploaded += 1
+    # Пишем все строки
+    for row in all_rows:
+        ws.append_row(row)
 
-    print(f"✅ {uploaded} строк за {date_str} → Google Sheets")
+    print(f"✅ {len(all_rows)} строк → Google Sheets")
 
 
 async def main():
-    csv_path, date_str = await download_csv()
-    upload_to_sheets(csv_path, date_str)
+    header, all_rows, date_str = await main_scrape()
+    upload_to_sheets(header, all_rows, date_str)
     print("🎉 All done!")
 
 
