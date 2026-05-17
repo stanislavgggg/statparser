@@ -8,7 +8,7 @@ from playwright.async_api import async_playwright
 from datetime import datetime, timedelta
 
 # ---------------------------------------------------------------------------
-# Config — все значения берутся из env vars Railway
+# Config
 # ---------------------------------------------------------------------------
 LOGIN_URL = "https://gggroup.voonix.net/"
 
@@ -70,37 +70,25 @@ async def download_csv() -> tuple[str, str]:
         await page.click('input[type="submit"][value="Login"]')
         await page.wait_for_load_state("networkidle")
         await page.wait_for_timeout(2000)
-        await screenshot(page, "1_after_login")
         print(f"✅ Logged in | URL: {page.url}")
 
-        # -- Переход на отчёт напрямую --
+        # -- Переход на отчёт --
         print("⏳ Переходим на отчёт...")
         await page.goto(report_url, wait_until="domcontentloaded")
         await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(5000)  # ждём пока DataTables отрендерит кнопки
         await screenshot(page, "2_report_page")
         print(f"✅ Report loaded | URL: {page.url}")
 
         # -- Скачать CSV --
+        # Точный селектор из HTML: <a class="dt-button buttons-csv buttons-html5">
         print("⏳ Скачиваем CSV...")
-        downloaded = False
-        for sel in ['a:has-text("CSV")', 'text=CSV', 'a[href*="csv"]']:
-            try:
-                async with page.expect_download(timeout=30000) as dl:
-                    await page.click(sel, timeout=8000)
-                download = await dl.value
-                await download.save_as(save_path)
-                downloaded = True
-                print(f"✅ CSV downloaded via: {sel}")
-                break
-            except Exception as e:
-                print(f"   ⚠️ {sel} — {e}")
-
-        if not downloaded:
-            await screenshot(page, "3_csv_failed")
-            raise Exception("Не удалось найти кнопку CSV")
-
+        async with page.expect_download(timeout=30000) as dl:
+            await page.click('a.buttons-csv', timeout=10000)
+        download = await dl.value
+        await download.save_as(save_path)
         print(f"✅ CSV saved → {save_path}")
+
         await browser.close()
         return save_path, date_str
 
@@ -130,23 +118,19 @@ def upload_to_sheets(csv_path: str, date_str: str):
 
     existing = ws.get_all_values()
 
-    # -- Защита от дублей --
-    # Если в таблице уже есть строки с этой датой — пропускаем
+    # Защита от дублей
     if existing:
-        existing_dates = [row[0] for row in existing[1:] if row]  # первая колонка = Date
+        existing_dates = [row[0] for row in existing[1:] if row]
         if date_str in existing_dates:
-            print(f"⚠️  Данные за {date_str} уже есть в таблице — пропускаем")
+            print(f"⚠️  Данные за {date_str} уже есть — пропускаем")
             return
 
-    # Если таблица пустая — пишем заголовок
     if not existing:
-        header = ["Date"] + rows[0]
-        ws.append_row(header)
+        ws.append_row(["Date"] + rows[0])
         data_rows = rows[1:]
     else:
-        data_rows = rows[1:]  # заголовок уже есть
+        data_rows = rows[1:]
 
-    # Записываем строки данных
     uploaded = 0
     for row in data_rows:
         if any(cell.strip() for cell in row):
