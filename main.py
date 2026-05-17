@@ -46,7 +46,7 @@ async def download_csv() -> tuple[str, str]:
         )
         context = await browser.new_context(
             accept_downloads=True,
-            viewport={"width": 1280, "height": 800},
+            viewport={"width": 1280, "height": 900},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         )
         page = await context.new_page()
@@ -59,69 +59,38 @@ async def download_csv() -> tuple[str, str]:
         await page.fill('input[name="username"]', USERNAME)
         await page.fill('input[name="password"]', PASSWORD)
         await page.click('input[type="submit"][value="Login"]')
-        await page.wait_for_selector('#menu', timeout=30000)
-        await page.wait_for_timeout(1000)
-        print(f"✅ Logged in | URL: {page.url}")
+        await page.wait_for_timeout(8000)
+        print(f"✅ After login | URL: {page.url}")
 
         # -- Переходим на отчёт --
         print("⏳ Переходим на отчёт...")
         await page.goto(report_url, wait_until="domcontentloaded")
-        await page.wait_for_selector('#sitestats', timeout=30000)
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(8000)
         await screenshot(page, "1_report")
-        print(f"✅ Report loaded")
+        print(f"✅ Report | URL: {page.url} | Title: {await page.title()}")
 
-        # -- Дебаг: логируем всё что есть в зоне Download --
-        download_area = await page.evaluate("""
-            () => {
-                // Ищем всё вокруг слова Download
-                const all = document.querySelectorAll('a, input[type=button], input[type=submit], button');
-                return Array.from(all).map(el => ({
-                    tag: el.tagName,
-                    type: el.type || '',
-                    value: el.value || '',
-                    text: el.textContent.trim(),
-                    href: el.href || '',
-                    class: el.className,
-                    name: el.name || ''
-                })).filter(el => 
-                    el.text.includes('CSV') || el.text.includes('Excel') || 
-                    el.value.includes('CSV') || el.href.includes('csv') ||
-                    el.class.includes('csv') || el.name.includes('csv')
-                );
-            }
-        """)
-        print(f"🔍 CSV-related элементы: {download_area}")
+        # Проверяем наличие кнопки
+        btn_count = await page.locator('a.buttons-csv').count()
+        print(f"🔍 a.buttons-csv count: {btn_count}")
 
-        # Пробуем все варианты Download CSV
-        selectors = [
-            'input[value="CSV"]',
-            'a:has-text("CSV")',
-            'button:has-text("CSV")',
-            'input[name*="csv"]',
-            'a[href*="csv"]',
-        ]
-        downloaded = False
-        for sel in selectors:
-            try:
-                count = await page.locator(sel).count()
-                print(f"   {sel} → count: {count}")
-                if count > 0:
-                    async with page.expect_download(timeout=15000) as dl:
-                        await page.locator(sel).first.click()
-                    download = await dl.value
-                    await download.save_as(save_path)
-                    downloaded = True
-                    print(f"✅ Downloaded via: {sel}")
-                    break
-            except Exception as e:
-                print(f"   ⚠️ {sel}: {e}")
+        if btn_count == 0:
+            body = await page.inner_text('body')
+            print(f"Body: {body[:300]}")
+            raise Exception("Кнопка не найдена")
 
-        if not downloaded:
-            await screenshot(page, "2_failed")
-            raise Exception("Не удалось скачать CSV")
-
+        # -- Скачиваем через dispatchEvent (игнорирует видимость/перекрытие) --
+        print("⏳ Кликаем через dispatchEvent...")
+        async with page.expect_download(timeout=30000) as dl:
+            await page.evaluate("""
+                () => {
+                    const btn = document.querySelector('a.buttons-csv');
+                    btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                }
+            """)
+        download = await dl.value
+        await download.save_as(save_path)
         print(f"✅ CSV saved → {save_path}")
+
         await browser.close()
         return save_path, date_str
 
