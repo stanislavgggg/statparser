@@ -54,31 +54,46 @@ async def download_csv() -> tuple[str, str]:
         print("⏳ Логинимся...")
         await page.goto(LOGIN_URL, wait_until="domcontentloaded")
         await page.wait_for_timeout(2000)
+        await screenshot(page, "0_login_form")
+
         await page.fill('input[name="username"]', USERNAME)
         await page.fill('input[name="password"]', PASSWORD)
-        await page.click('input[type="submit"][value="Login"]')
-        await page.wait_for_timeout(5000)
-        print(f"✅ After login | URL: {page.url}")
-        await screenshot(page, "1_after_login")
+        await screenshot(page, "1_filled")
 
-        # -- Переход через window.location (без нового goto) --
-        print("⏳ Navigating via window.location...")
+        await page.click('input[type="submit"][value="Login"]')
+        await page.wait_for_timeout(8000)
+        await screenshot(page, "2_after_login")
+
+        url = page.url
+        title = await page.title()
+        body = (await page.inner_text('body'))[:600]
+        cookies = await context.cookies()
+        print(f"✅ After login:")
+        print(f"   URL: {url}")
+        print(f"   Title: {title}")
+        print(f"   Body: {body}")
+        print(f"   Cookies: {[(c['name'], c['value'][:30]) for c in cookies]}")
+
+        # Если всё ещё на странице логина — проблема в логине
+        if 'login' in title.lower() or 'login' in body.lower()[:100]:
+            print("❌ Логин не прошёл — остались на странице логина!")
+            raise Exception("Логин не прошёл")
+
+        # -- Переход через window.location --
+        print("⏳ Navigating to report...")
         await page.evaluate(f"window.location.href = '/{report_params}'")
         await page.wait_for_timeout(10000)
-        await screenshot(page, "2_report")
-        print(f"✅ Report | URL: {page.url} | Title: {await page.title()}")
+        await screenshot(page, "3_report")
+        print(f"   URL: {page.url}")
+        print(f"   Title: {await page.title()}")
 
         btn_count = await page.locator('a.buttons-csv').count()
-        rows_count = await page.locator('#sitestats table tr').count()
-        print(f"🔍 a.buttons-csv: {btn_count} | table rows: {rows_count}")
+        print(f"🔍 a.buttons-csv: {btn_count}")
 
         if btn_count == 0:
-            body = await page.inner_text('body')
-            print(f"Body: {body[:400]}")
             raise Exception("Кнопка CSV не найдена")
 
-        # -- Скачиваем CSV через dispatchEvent --
-        print("⏳ Кликаем CSV через dispatchEvent...")
+        print("⏳ Downloading CSV...")
         async with page.expect_download(timeout=30000) as dl:
             await page.evaluate("""
                 () => {
