@@ -7,4 +7,6 @@ RUN playwright install chromium
 
 COPY main.py .
 
-CMD ["python", "main.py"]
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-u", "main.py"]
