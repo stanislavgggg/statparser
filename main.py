@@ -281,22 +281,28 @@ def upload_to_sheets(header: list, all_rows: list[list], date_str: str):
 
     existing = ws.get_all_values()
 
-    # Защита от дублей ВРЕМЕННО ОТКЛЮЧЕНА для теста
-    # if existing:
-    #     existing_dates = [r[0] for r in existing[1:] if r]
-    #     if date_str in existing_dates:
-    #         print(f"⚠️  {date_str} уже есть — пропускаем")
-    #         return
+    # Защита от дублей
+    if existing:
+        existing_dates = [r[0] for r in existing[1:] if r]
+        if date_str in existing_dates:
+            print(f"⚠️  {date_str} уже есть — пропускаем")
+            return
 
-    # Заголовок при первом запуске
+    # Собираем все строки для записи
+    rows_to_write = []
     if not existing and header:
-        ws.append_row(header)
+        rows_to_write.append(header)
+    rows_to_write.extend(all_rows)
 
-    # Пишем все строки
-    for row in all_rows:
-        ws.append_row(row)
+    # Пишем батчами по 500 строк (лимит Google Sheets API)
+    batch_size = 500
+    for i in range(0, len(rows_to_write), batch_size):
+        batch = rows_to_write[i:i + batch_size]
+        ws.append_rows(batch, value_input_option="USER_ENTERED")
+        print(f"✅ Записано строк {i+1}-{min(i+batch_size, len(rows_to_write))}")
+        time.sleep(2)
 
-    print(f"✅ {len(all_rows)} строк → Google Sheets")
+    print(f"✅ Всего {len(all_rows)} строк → Google Sheets")
 
 
 async def main():
