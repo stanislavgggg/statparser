@@ -1,113 +1,92 @@
-import asyncio
 import os
 import csv
 import json
+import requests
 import gspread
 from google.oauth2.service_account import Credentials
-from playwright.async_api import async_playwright
 from datetime import datetime, timedelta
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-LOGIN_URL = "https://gggroup.voonix.net/"
+BASE_URL  = "https://gggroup.voonix.net"
+LOGIN_URL = f"{BASE_URL}/"
 
 USERNAME          = os.environ["VOONIX_USER"]
 PASSWORD          = os.environ["VOONIX_PASS"]
 SHEET_ID          = os.environ["GOOGLE_SHEET_ID"]
 GOOGLE_CREDS_JSON = os.environ["GOOGLE_CREDS_JSON"]
 
-DOWNLOAD_DIR   = "/tmp/voonix"
-SCREENSHOT_DIR = "/tmp/voonix/screenshots"
+DOWNLOAD_DIR = "/tmp/voonix"
 
 
 def get_yesterday() -> str:
     return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-async def screenshot(page, name):
-    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-    await page.screenshot(path=f"{SCREENSHOT_DIR}/{name}.png", full_page=True)
-    print(f"📸 {name}.png")
-
-
-async def download_csv() -> tuple[str, str]:
+# ---------------------------------------------------------------------------
+# 1. Скачать CSV через requests (сессия сохраняется автоматически)
+# ---------------------------------------------------------------------------
+def download_csv() -> tuple[str, str]:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     date_str = get_yesterday()
     save_path = os.path.join(DOWNLOAD_DIR, f"voonix_{date_str}.csv")
+
+    print(f"📅 Дата: {date_str}")
+
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": BASE_URL,
+    })
+
+    # -- Логин --
+    print("⏳ Логинимся...")
+    login_data = {
+        "username": USERNAME,
+        "password": PASSWORD,
+    }
+    resp = session.post(LOGIN_URL, data=login_data, allow_redirects=True)
+    print(f"✅ Login response: {resp.status_code} | URL: {resp.url}")
+    print(f"🍪 Cookies: {dict(session.cookies)}")
+    print(f"📄 Body snippet: {resp.text[:300]}")
+
+    # -- Запрос отчёта --
+    print("⏳ Запрашиваем отчёт...")
     report_url = (
-        f"https://gggroup.voonix.net/?p=siteearnings"
+        f"{BASE_URL}/?p=siteearnings"
         f"&start={date_str}&end={date_str}&ql=yesterday&&submit"
     )
-    print(f"📅 Дата: {date_str}")
-    print(f"🔗 URL: {report_url}")
+    resp2 = session.get(report_url)
+    print(f"✅ Report response: {resp2.status_code} | URL: {resp2.url}")
+    print(f"📄 Body snippet: {resp2.text[:300]}")
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
-        )
-        context = await browser.new_context(
-            accept_downloads=True,
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        )
-        page = await context.new_page()
-        page.set_default_timeout(60000)
+    # Проверяем что не редиректнуло на логин
+    if "Login" in resp2.text[:100] or resp2.url != report_url:
+        raise Exception(f"Сессия не сохранилась — редирект на логин. URL: {resp2.url}")
 
-        # -- Логин --
-        print("⏳ Логинимся...")
-        await page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        await page.wait_for_timeout(2000)
-        await page.fill('input[name="username"]', USERNAME)
-        await page.fill('input[name="password"]', PASSWORD)
-        await page.click('input[type="submit"][value="Login"]')
-        await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(3000)
-        print(f"✅ Logged in | URL: {page.url}")
+    # -- Скачать CSV --
+    # DataTables генерирует CSV на клиенте через JS — через requests не получим кнопку
+    # Но попробуем найти прямой export endpoint
+    print("⏳ Пробуем скачать CSV напрямую...")
+    csv_url = (
+        f"{BASE_URL}/?p=siteearnings"
+        f"&start={date_str}&end={date_str}&ql=yesterday&&submit&export=csv"
+    )
+    resp3 = session.get(csv_url)
+    print(f"✅ CSV response: {resp3.status_code} | Content-Type: {resp3.headers.get('content-type')}")
+    print(f"📄 CSV snippet: {resp3.text[:200]}")
 
-        # -- Переход на отчёт по URL --
-        print("⏳ Переходим на отчёт...")
-        await page.goto(report_url, wait_until="domcontentloaded")
-        await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(3000)
-        await screenshot(page, "1_report_loaded")
-        print(f"✅ URL: {page.url}")
+    with open(save_path, "w", encoding="utf-8") as f:
+        f.write(resp3.text)
 
-        # -- Кликаем кнопку View чтобы загрузить данные --
-        print("⏳ Кликаем View...")
-        try:
-            await page.click('input[value="View"], button:has-text("View")', timeout=5000)
-            await page.wait_for_load_state("networkidle")
-            await page.wait_for_timeout(5000)
-            await screenshot(page, "2_after_view")
-            print("✅ View clicked")
-        except Exception as e:
-            print(f"   View не найден: {e}")
-
-        # Дебаг
-        rows = await page.locator('table tr').count()
-        btns = await page.locator('a.buttons-csv').count()
-        body_snippet = (await page.inner_text('body'))[:300]
-        print(f"🔍 table tr: {rows} | a.buttons-csv: {btns}")
-        print(f"📄 Body: {body_snippet}")
-
-        if btns == 0:
-            await screenshot(page, "3_no_btn")
-            raise Exception("Кнопка CSV не найдена")
-
-        # -- Скачиваем CSV --
-        print("⏳ Скачиваем CSV...")
-        async with page.expect_download(timeout=30000) as dl:
-            await page.locator('a.buttons-csv').first.click()
-        download = await dl.value
-        await download.save_as(save_path)
-        print(f"✅ CSV saved → {save_path}")
-
-        await browser.close()
-        return save_path, date_str
+    print(f"✅ Saved → {save_path}")
+    return save_path, date_str
 
 
+# ---------------------------------------------------------------------------
+# 2. Загрузить в Google Sheets
+# ---------------------------------------------------------------------------
 def upload_to_sheets(csv_path: str, date_str: str):
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
     creds = Credentials.from_service_account_info(
@@ -150,11 +129,14 @@ def upload_to_sheets(csv_path: str, date_str: str):
     print(f"✅ {uploaded} rows → Google Sheets")
 
 
-async def main():
-    csv_path, date_str = await download_csv()
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+def main():
+    csv_path, date_str = download_csv()
     upload_to_sheets(csv_path, date_str)
     print("🎉 All done!")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
