@@ -2,7 +2,6 @@ import asyncio
 import os
 import csv
 import json
-import requests
 import gspread
 from google.oauth2.service_account import Credentials
 from playwright.async_api import async_playwright
@@ -33,9 +32,6 @@ async def screenshot(page, name):
     print(f"📸 {name}.png")
 
 
-# ---------------------------------------------------------------------------
-# 1. Логин через requests → получаем куки → передаём в Playwright
-# ---------------------------------------------------------------------------
 async def download_csv() -> tuple[str, str]:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     date_str = get_yesterday()
@@ -46,21 +42,6 @@ async def download_csv() -> tuple[str, str]:
     )
     print(f"📅 Дата: {date_str}")
 
-    # -- Логин через requests --
-    print("⏳ Логинимся через requests...")
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    })
-    resp = session.post(LOGIN_URL, data={"username": USERNAME, "password": PASSWORD})
-    cookies = dict(session.cookies)
-    print(f"✅ Login: {resp.status_code} | Cookies: {cookies}")
-
-    if not cookies:
-        raise Exception("Логин не прошёл — куки пустые")
-
-    # -- Передаём куки в Playwright --
-    print("⏳ Открываем браузер с куками сессии...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -69,47 +50,42 @@ async def download_csv() -> tuple[str, str]:
         context = await browser.new_context(
             accept_downloads=True,
             viewport={"width": 1280, "height": 800},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         )
-
-        # Добавляем куки из requests сессии в Playwright контекст
-        playwright_cookies = [
-            {
-                "name": name,
-                "value": value,
-                "domain": "gggroup.voonix.net",
-                "path": "/",
-            }
-            for name, value in cookies.items()
-        ]
-        await context.add_cookies(playwright_cookies)
-        print(f"🍪 Передано куки в Playwright: {[c['name'] for c in playwright_cookies]}")
-
         page = await context.new_page()
         page.set_default_timeout(60000)
 
-        # -- Переходим на отчёт (уже с куками) --
-        print("⏳ Открываем отчёт...")
+        # -- Логин --
+        print("⏳ Логинимся...")
+        await page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        await page.wait_for_timeout(2000)
+        await page.fill('input[name="username"]', USERNAME)
+        await page.fill('input[name="password"]', PASSWORD)
+        await page.click('input[type="submit"][value="Login"]')
+
+        # Ждём появления элемента главной страницы после логина
+        # Из HTML видно: после логина есть div id="menu"
+        await page.wait_for_selector('#menu', timeout=30000)
+        await page.wait_for_timeout(1000)
+        print(f"✅ Logged in | URL: {page.url}")
+        await screenshot(page, "1_logged_in")
+
+        # -- Переходим на отчёт в том же окне --
+        print("⏳ Переходим на отчёт...")
         await page.goto(report_url, wait_until="domcontentloaded")
-        await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(5000)
-        await screenshot(page, "1_report")
 
-        title = await page.title()
-        url_now = page.url
-        print(f"📄 Title: {title} | URL: {url_now}")
+        # Ждём появления div#sitestats — это контейнер с таблицей
+        print("⏳ Ждём таблицу (#sitestats)...")
+        await page.wait_for_selector('#sitestats', timeout=30000)
 
-        # Проверяем что не на странице логина
-        body = await page.inner_text('body')
-        print(f"📄 Body (200): {body[:200]}")
+        # Ждём появления кнопки CSV которую рендерит DataTables
+        print("⏳ Ждём кнопку CSV (.buttons-csv)...")
+        await page.wait_for_selector('a.buttons-csv', timeout=30000)
+        await page.wait_for_timeout(500)
 
-        # Ждём кнопку CSV
-        btn_count = await page.locator('a.buttons-csv').count()
         rows_count = await page.locator('table tr').count()
-        print(f"🔍 a.buttons-csv: {btn_count} | table tr: {rows_count}")
-
-        if btn_count == 0:
-            await screenshot(page, "2_no_btn")
-            raise Exception("Кнопка CSV не найдена после передачи куки")
+        print(f"✅ Таблица загружена | tr: {rows_count}")
+        await screenshot(page, "2_report")
 
         # -- Скачиваем CSV --
         print("⏳ Скачиваем CSV...")
@@ -168,9 +144,6 @@ def upload_to_sheets(csv_path: str, date_str: str):
     print(f"✅ {uploaded} rows → Google Sheets")
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 async def main():
     csv_path, date_str = await download_csv()
     upload_to_sheets(csv_path, date_str)
