@@ -33,10 +33,8 @@ async def download_csv() -> tuple[str, str]:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     date_str = get_yesterday()
     save_path = os.path.join(DOWNLOAD_DIR, f"voonix_{date_str}.csv")
-    report_url = (
-        f"{BASE_URL}/?p=siteearnings"
-        f"&start={date_str}&end={date_str}&ql=yesterday&&submit"
-    )
+    report_params = f"?p=siteearnings&start={date_str}&end={date_str}&ql=yesterday&&submit"
+
     print(f"📅 Дата: {date_str}")
 
     async with async_playwright() as p:
@@ -59,27 +57,28 @@ async def download_csv() -> tuple[str, str]:
         await page.fill('input[name="username"]', USERNAME)
         await page.fill('input[name="password"]', PASSWORD)
         await page.click('input[type="submit"][value="Login"]')
-        await page.wait_for_timeout(8000)
+        await page.wait_for_timeout(5000)
         print(f"✅ After login | URL: {page.url}")
+        await screenshot(page, "1_after_login")
 
-        # -- Переходим на отчёт --
-        print("⏳ Переходим на отчёт...")
-        await page.goto(report_url, wait_until="domcontentloaded")
-        await page.wait_for_timeout(8000)
-        await screenshot(page, "1_report")
+        # -- Переход через window.location (без нового goto) --
+        print("⏳ Navigating via window.location...")
+        await page.evaluate(f"window.location.href = '/{report_params}'")
+        await page.wait_for_timeout(10000)
+        await screenshot(page, "2_report")
         print(f"✅ Report | URL: {page.url} | Title: {await page.title()}")
 
-        # Проверяем наличие кнопки
         btn_count = await page.locator('a.buttons-csv').count()
-        print(f"🔍 a.buttons-csv count: {btn_count}")
+        rows_count = await page.locator('#sitestats table tr').count()
+        print(f"🔍 a.buttons-csv: {btn_count} | table rows: {rows_count}")
 
         if btn_count == 0:
             body = await page.inner_text('body')
-            print(f"Body: {body[:300]}")
-            raise Exception("Кнопка не найдена")
+            print(f"Body: {body[:400]}")
+            raise Exception("Кнопка CSV не найдена")
 
-        # -- Скачиваем через dispatchEvent (игнорирует видимость/перекрытие) --
-        print("⏳ Кликаем через dispatchEvent...")
+        # -- Скачиваем CSV через dispatchEvent --
+        print("⏳ Кликаем CSV через dispatchEvent...")
         async with page.expect_download(timeout=30000) as dl:
             await page.evaluate("""
                 () => {
