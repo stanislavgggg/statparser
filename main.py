@@ -66,31 +66,42 @@ async def download_csv() -> tuple[str, str]:
         await screenshot(page, "1_after_login")
         print(f"✅ Logged in | URL: {page.url}")
 
-        # -- Кликаем Site earnings в меню (без нового goto) --
-        print("⏳ Кликаем Site earnings в меню...")
-        await page.click('a[href="?p=siteearnings"]')
+        # -- JS клик по ссылке Site earnings (игнорирует видимость) --
+        print("⏳ JS-клик по Site earnings...")
+        clicked = await page.evaluate("""
+            () => {
+                const links = document.querySelectorAll('a');
+                for (const a of links) {
+                    if (a.href && a.href.includes('p=siteearnings')) {
+                        a.click();
+                        return 'clicked: ' + a.href;
+                    }
+                }
+                // Логируем все ссылки для диагностики
+                return 'not found. links: ' + Array.from(links).map(a => a.href + '|' + a.textContent.trim()).slice(0,20).join(' || ');
+            }
+        """)
+        print(f"🔍 JS click result: {clicked}")
         await page.wait_for_load_state("networkidle")
         await page.wait_for_timeout(5000)
         await screenshot(page, "2_site_earnings")
-        print(f"✅ Site earnings | URL: {page.url}")
+        print(f"✅ After JS click | URL: {page.url}")
 
-        # -- Устанавливаем дату через поля Period --
-        print(f"⏳ Устанавливаем дату {date_str}...")
-        # Очищаем и вводим дату в поля start/end
-        await page.fill('input[name="site_start"], input[id*="start"], input[type="text"]:first-of-type', date_str)
-        await page.wait_for_timeout(500)
-
-        # Пробуем найти поля даты и заполнить
-        date_inputs = await page.locator('input[type="text"]').all()
-        print(f"🔍 Полей input[type=text]: {len(date_inputs)}")
-        for i, inp in enumerate(date_inputs[:5]):
-            val = await inp.get_attribute('value')
-            name = await inp.get_attribute('name')
-            print(f"   [{i}] name={name} value={val}")
-
-        # -- Кликаем Yesterday через quick links --
-        print("⏳ Кликаем Yesterday...")
-        await page.click('a:has-text("Yesterday")')
+        # -- JS клик по Yesterday --
+        print("⏳ JS-клик по Yesterday...")
+        clicked2 = await page.evaluate("""
+            () => {
+                const links = document.querySelectorAll('a');
+                for (const a of links) {
+                    if (a.textContent.trim() === 'Yesterday') {
+                        a.click();
+                        return 'clicked Yesterday';
+                    }
+                }
+                return 'Yesterday not found. links: ' + Array.from(links).map(a => a.textContent.trim()).filter(t=>t).slice(0,30).join(' | ');
+            }
+        """)
+        print(f"🔍 Yesterday click: {clicked2}")
         await page.wait_for_load_state("networkidle")
         await page.wait_for_timeout(5000)
         await screenshot(page, "3_after_yesterday")
@@ -100,6 +111,20 @@ async def download_csv() -> tuple[str, str]:
         rows_count = await page.locator('table tr').count()
         btn_count = await page.locator('a.buttons-csv').count()
         print(f"🔍 Строк в таблице: {rows_count} | a.buttons-csv: {btn_count}")
+
+        if btn_count == 0:
+            # Дополнительный дебаг
+            all_a = await page.evaluate("""
+                () => Array.from(document.querySelectorAll('a'))
+                    .map(a => a.className + ' :: ' + a.textContent.trim())
+                    .filter(x => x.trim() !== ' :: ')
+                    .slice(0, 40)
+            """)
+            print("🔍 Все ссылки:")
+            for a in all_a:
+                print(f"   {a[:120]}")
+            await screenshot(page, "4_no_csv_btn")
+            raise Exception("Кнопка CSV не найдена")
 
         # -- Скачиваем CSV --
         print("⏳ Скачиваем CSV...")
