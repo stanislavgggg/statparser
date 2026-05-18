@@ -177,27 +177,29 @@ async def get_account_ids(page, date_str: str, adve_id: str) -> list[tuple[str, 
     return [(l['id'], l['name']) for l in links]
 
 
-# Единый заголовок для всех уровней
+# Единый заголовок для всех уровней (все колонки из CSV)
 FINAL_HEADER = [
     "Date", "Advertiser", "Account", "Campaign",
     "Clicks", "Unique clicks", "Signups", "Active players",
     "Depositors", "Deposits", "Deposit value", "Bonus", "FTD",
     "C/SU %", "C/FTD %", "SU/FTD %", "Player value",
     "CPA", "NDC", "QNDC", "Turnover", "Net revenue",
-    "REV income", "CPA income"
+    "REV income", "CPA income", "CPL income", "Gross revenue",
+    "Extra fees", "Total income", "Inc/dep", "Rev/dep",
+    "RS Dealas", "Dep/Comp-rev", "Pilnas dealas", "(A) Rev/Dep"
 ]
 
 
 def normalize_row(date, advertiser, account, campaign, csv_header, csv_row):
-    """Приводит строку CSV к единой схеме FINAL_HEADER"""
-    # Маппинг: название колонки CSV -> значение
+    """Приводит строку CSV к единой схеме FINAL_HEADER.
+    csv_header и csv_row — полные строки включая первую колонку (имя)"""
     row_map = {}
     for i, col in enumerate(csv_header):
         if i < len(csv_row):
             row_map[col.strip()] = csv_row[i].strip()
 
     result = [date, advertiser, account, campaign]
-    for col in FINAL_HEADER[4:]:  # пропускаем первые 4 (Date, Advertiser, Account, Campaign)
+    for col in FINAL_HEADER[4:]:
         result.append(row_map.get(col, ""))
     return result
 
@@ -216,7 +218,7 @@ async def scrape_all(page, date_str: str) -> tuple[list, list[list]]:
         print(f"   L1 ВСЕ заголовки: {h1}")
         for row in data1:
             advertiser = row[0] if row else ""
-            all_rows.append(normalize_row(date_str, advertiser, "", "", h1, row[1:]))
+            all_rows.append(normalize_row(date_str, advertiser, "", "", h1, row))
         print(f"   ✅ {len(data1)} advertisers")
 
     # -- Уровень 2 & 3: для каждого advertiser --
@@ -231,7 +233,7 @@ async def scrape_all(page, date_str: str) -> tuple[list, list[list]]:
             h2, data2 = result2
             for row in data2:
                 account = row[0] if row else ""
-                all_rows.append(normalize_row(date_str, adve_name, account, "", h2, row[1:]))
+                all_rows.append(normalize_row(date_str, adve_name, account, "", h2, row))
 
         # Уровень 3
         account_list = await get_account_ids(page, date_str, adve_id)
@@ -244,7 +246,7 @@ async def scrape_all(page, date_str: str) -> tuple[list, list[list]]:
                 h3, data3 = result3
                 for row in data3:
                     campaign = row[0] if row else ""
-                    all_rows.append(normalize_row(date_str, adve_name, account_name, campaign, h3, row[1:]))
+                    all_rows.append(normalize_row(date_str, adve_name, account_name, campaign, h3, row))
 
     return FINAL_HEADER, all_rows
 
@@ -306,13 +308,6 @@ def upload_to_sheets(header: list, all_rows: list[list], date_str: str):
     ws = sh.sheet1
 
     existing = ws.get_all_values()
-
-    # Защита от дублей
-    if existing:
-        existing_dates = [r[0] for r in existing[1:] if r]
-        if date_str in existing_dates:
-            print(f"⚠️  {date_str} уже есть — пропускаем")
-            return
 
     # Собираем все строки для записи
     rows_to_write = []
