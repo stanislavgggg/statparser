@@ -218,7 +218,7 @@ async def scrape_all(page, date_str: str) -> tuple[list, list[list]]:
         print(f"   L1 ВСЕ заголовки: {h1}")
         for row in data1:
             advertiser = row[0] if row else ""
-            all_rows.append(normalize_row(date_str, advertiser, "", "", h1, row))
+            all_rows.append(normalize_row(date_str, advertiser, "", "", h1[1:], row[1:]))
         print(f"   ✅ {len(data1)} advertisers")
 
     # -- Уровень 2 & 3: для каждого advertiser --
@@ -233,7 +233,7 @@ async def scrape_all(page, date_str: str) -> tuple[list, list[list]]:
             h2, data2 = result2
             for row in data2:
                 account = row[0] if row else ""
-                all_rows.append(normalize_row(date_str, adve_name, account, "", h2, row))
+                all_rows.append(normalize_row(date_str, adve_name, account, "", h2[1:], row[1:]))
 
         # Уровень 3
         account_list = await get_account_ids(page, date_str, adve_id)
@@ -246,7 +246,7 @@ async def scrape_all(page, date_str: str) -> tuple[list, list[list]]:
                 h3, data3 = result3
                 for row in data3:
                     campaign = row[0] if row else ""
-                    all_rows.append(normalize_row(date_str, adve_name, account_name, campaign, h3, row))
+                    all_rows.append(normalize_row(date_str, adve_name, account_name, campaign, h3[1:], row[1:]))
 
     return FINAL_HEADER, all_rows
 
