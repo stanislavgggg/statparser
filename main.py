@@ -213,7 +213,7 @@ async def scrape_all(page, date_str: str) -> tuple[list, list[list]]:
     result = await download_level_csv(page, params_l1, path_l1)
     if result:
         h1, data1 = result
-        print(f"   L1 заголовки: {h1[:6]}")
+        print(f"   L1 ВСЕ заголовки: {h1}")
         for row in data1:
             advertiser = row[0] if row else ""
             all_rows.append(normalize_row(date_str, advertiser, "", "", h1, row[1:]))
